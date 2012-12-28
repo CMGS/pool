@@ -6,8 +6,8 @@
 
 """Core event interfaces."""
 
-import pool
 from . import event, exc, util
+pool = util.importlater('pool', 'pool')
 
 class DDLEvents(event.Events):
     """

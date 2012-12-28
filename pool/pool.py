@@ -18,7 +18,7 @@ SQLAlchemy connection pool.
 
 import weakref, time, traceback
 
-from . import exc, log, event, events, interfaces, util
+from . import exc, log, event, events, interfaces
 from .util import queue as sqla_queue
 from .util import threading, memoized_property, chop_traceback
 
@@ -943,3 +943,65 @@ class _DBProxy(object):
             list(args) + 
             [(k, kw[k]) for k in sorted(kw)]
         )
+
+
+factories = {}
+
+def manage_factory(factory, **params):
+    managed_factory = factories.get(factory)
+    if managed_factory is None:
+        managed_factory = factories[factory] = ManagedFactory(factory, **params)
+    return managed_factory
+
+
+class ManagedFactory(object):
+    def __init__(self, factory, poolclass=QueuePool, **kw):
+        self.factory = factory
+        self.poolclass = poolclass
+        self.kw = kw
+        self.pools = {}
+        self._create_pool_mutex = threading.Lock()
+
+    def close(self):
+        for key in self.pools.keys():
+            del self.pools[key]
+
+    def __del__(self):
+        self.close()
+
+    def __call__(self, *args, **kw):
+        pool = self.get_pool(*args, **kw)
+        return PooledProxy(pool)
+
+    def get_pool(self, *args, **kw):
+        key = self._serialize(*args, **kw)
+        pool = self.pools.get(key)
+        if pool is None:
+            self._create_pool_mutex.acquire()
+            try:
+                if key not in self.pools:
+                    kw.pop('pool_key', None)
+                    pool = self.pools[key] = self.poolclass(
+                        lambda: self.factory(*args, **kw),
+                        **self.kw)
+                else:
+                    pool = self.pools[key]
+            finally:
+                self._create_pool_mutex.release()
+        return pool
+
+    def _serialize(self, *args, **kw):
+        if 'pool_key' in kw:
+            return kw['pool_key']
+
+        return (args, tuple(sorted(kw.items())))
+
+
+class PooledProxy(object):
+    def __init__(self, pool):
+        self.pool = pool
+
+    def __getattr__(self, name):
+        conn = self.pool.connect()
+        return getattr(conn, name)
+
