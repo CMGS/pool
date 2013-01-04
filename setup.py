@@ -22,4 +22,6 @@ when we use gevent and pymysql, mysql connections would create and release in a 
       entry_points="""
       # -*- Entry points: -*-
       """,
+      tests_require=['nose'],
+      test_suite='nose.collector',
       )

@@ -17,6 +17,7 @@ connection pool.
 """
 
 import weakref, time, traceback
+from functools import wraps, partial
 
 from . import exc, log, event, events, interfaces
 from .util import queue as sqla_queue
@@ -799,99 +800,27 @@ class AssertionPool(Pool):
         return self._conn
 
 
-class ThreadSafeFactory(object):
-    """Layers connection pooling behavior on top of a connection factory.
-
-    Proxies a factory call to a connection pool keyed to the specific connect
-    parameters.
-
-    The returned connection object proxy is thread safe, i.e. calling its
-    method in different thread will not interfered with each other.
-
-    """
-
-    def __init__(self, factory, poolclass=QueuePool, **kw):
-        """Initializes a new proxy.
-
-        factory
-          a callable returns a connection object
-
-        poolclass
-          a Pool class, defaulting to QueuePool
-
-        Other parameters are sent to the Pool object's constructor.
-
-        """
-
-        self.factory = factory
-        self.kw = kw
-        self.poolclass = poolclass
-        self.pools = {}
-        self._create_pool_mutex = threading.Lock()
-
-    def close(self):
-        for key in self.pools.keys():
-            del self.pools[key]
-
-    def __del__(self):
-        self.close()
-
-    def get_pool(self, *args, **kw):
-        key = self._serialize(*args, **kw)
-        try:
-            return self.pools[key]
-        except KeyError:
-            self._create_pool_mutex.acquire()
-            try:
-                if key not in self.pools:
-                    kw.pop('pool_key', None)
-                    pool = self.poolclass(lambda: 
-                                self.factory(*args, **kw), **self.kw)
-                    self.pools[key] = pool
-                    return pool
-                else:
-                    return self.pools[key]
-            finally:
-                self._create_pool_mutex.release()
-
-    def __call__(self, *args, **kw):
-        """Return a thread-safe proxy to connection.
-
-        Return a thread-safe proxy for the connection using the given
-        connect arguments.  If the arguments match an existing pool, the
-        connection will be returned from the pool's current thread-local
-        connection instance, or if there is no thread-local connection
-        instance it will be checked out from the set of pooled connections.
-
-        If the pool has no available connections and allows new connections
-        to be created, a new database connection will be made.
-
-        """
-
-        return ThreadSafeProxy(self.get_pool(*args, **kw).connect)
-
-    def dispose(self, *args, **kw):
-        """Dispose the pool referenced by the given connect arguments."""
-
-        key = self._serialize(*args, **kw)
-        try:
-            del self.pools[key]
-        except KeyError:
-            pass
-
-    def _serialize(self, *args, **kw):
-        if "pool_key" in kw:
-            return kw['pool_key']
-
-        return tuple(
-            list(args) + 
-            [(k, kw[k]) for k in sorted(kw)]
-        )
+def thread_safe_factory(poolclass=QueuePool, **pool_kw):
+    """Make a factory return thread-safe connection objects."""
+    def decorator(factory):
+        @wraps(factory)
+        def _(*a, **kw):
+            pool = poolclass(partial(factory, *a, **kw), **pool_kw)
+            return ThreadSafeProxy(pool.connect)
+        return _
+    return decorator
 
 
 class ThreadSafeProxy(object):
     def __init__(self, factory):
         self.factory = factory
+        self.local = threading.local()
 
     def __getattr__(self, name):
-        return getattr(self.factory(), name)
+        conn = getattr(self.local, 'connection', None)
+        if conn is None:
+            self.local.connection = conn = self.factory()
+        return getattr(conn, name)
+
+
+
