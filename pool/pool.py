@@ -5,57 +5,23 @@
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
 
 
-"""Connection pooling for DB-API connections.
+"""Connection pooling for connections.
 
 Provides a number of connection pool implementations for a variety of
 usage scenarios and thread behavior requirements imposed by the
-application, DB-API or database itself.
+application.
 
-Also provides a DB-API 2.0 connection proxying mechanism allowing
-regular DB-API connect() methods to be transparently managed by a
-SQLAlchemy connection pool.
+Also provides a connection proxying mechanism allowing
+regular connection factories to be transparently managed by a
+connection pool.
 """
 
 import weakref, time, traceback
+from functools import wraps, partial
 
-from . import exc, log, event, events, interfaces, util
+from . import exc, log, event, events, interfaces
 from .util import queue as sqla_queue
 from .util import threading, memoized_property, chop_traceback
-
-proxies = {}
-
-def manage(module, **params):
-    """Return a proxy for a DB-API module that automatically 
-    pools connections.
-
-    Given a DB-API 2.0 module and pool management parameters, returns
-    a proxy for the module that will automatically pool connections,
-    creating new connection pools for each distinct set of connection
-    arguments sent to the decorated module's connect() function.
-
-    :param module: a DB-API 2.0 database module
-
-    :param poolclass: the class used by the pool module to provide
-      pooling.  Defaults to :class:`.QueuePool`.
-
-    :param \*\*params: will be passed through to *poolclass*
-
-    """
-    try:
-        return proxies[module]
-    except KeyError:
-        return proxies.setdefault(module, _DBProxy(module, **params))
-
-def clear_managers():
-    """Remove all current DB-API 2.0 managers.
-
-    All pools and connections are disposed.
-    """
-
-    for manager in proxies.itervalues():
-        manager.close()
-    proxies.clear()
-
 
 class Pool(log.Identified):
     """Abstract base class for connection pools."""
@@ -65,13 +31,15 @@ class Pool(log.Identified):
                     use_threadlocal=False,
                     logging_name=None,
                     reset_on_return=True, 
-                    listeners=None,
                     events=None,
-                    _dispatch=None):
+                    _dispatch=None,
+                    close_method='close',
+                    reset_method='rollback',
+                ):
         """
         Construct a Pool.
 
-        :param creator: a callable function that returns a DB-API
+        :param creator: a callable function that returns a 
           connection object.  The function will be called with
           parameters.
 
@@ -82,13 +50,13 @@ class Pool(log.Identified):
 
         :param logging_name:  String identifier which will be used within
           the "name" field of logging records generated within the 
-          "sqlalchemy.pool" logger. Defaults to a hexstring of the object's 
+          "pool" logger. Defaults to a hexstring of the object's 
           id.
 
         :param echo: If True, connections being pulled and retrieved
           from the pool will be logged to the standard output, as well
           as pool sizing information.  Echoing can also be achieved by
-          enabling logging for the "sqlalchemy.pool"
+          enabling logging for the "pool"
           namespace. Defaults to False.
 
         :param use_threadlocal: If set to True, repeated calls to
@@ -100,23 +68,22 @@ class Pool(log.Identified):
           :meth:`unique_connection` method is provided to bypass the
           threadlocal behavior installed into :meth:`connect`.
 
-        :param reset_on_return: If true, reset the database state of
-          connections returned to the pool.  This is typically a
-          ROLLBACK to release locks and transaction resources.
+        :param reset_on_return: If true, reset the state of
+          connections returned to the pool.  This is a call of
+          :attr:`reset_method` to release locks and transaction resources.
           Disable at your own peril.  Defaults to True.
 
         :param events: a list of 2-tuples, each of the form
          ``(callable, target)`` which will be passed to event.listen()
-         upon construction.   Provided here so that event listeners
-         can be assigned via ``create_engine`` before dialect-level
-         listeners are applied.
+         upon construction.
 
-        :param listeners: Deprecated.  A list of
-          :class:`~sqlalchemy.interfaces.PoolListener`-like objects or
-          dictionaries of callables that receive events when DB-API
-          connections are created, checked out and checked in to the
-          pool.  This has been superseded by 
-          :func:`~sqlalchemy.event.listen`.
+        :param close_method: the method name of the connection object to call
+          (without parameter) to disconnect.  Set to None to disconnect at
+          garbage collection.  Defaults to "close".
+
+        :param reset_method: the method name of the connection object to call
+          (without parameter) to reset the state of the connection.  Set to
+          None if no such a method.  Defaults to "rollback".
 
         """
         if logging_name:
@@ -131,14 +98,13 @@ class Pool(log.Identified):
         self._use_threadlocal = use_threadlocal
         self._reset_on_return = reset_on_return
         self.echo = echo
+        self.close_method = close_method
+        self.reset_method = reset_method
         if _dispatch:
             self.dispatch._update(_dispatch, only_propagate=False)
         if events:
             for fn, target in events:
                 event.listen(self, target, fn)
-        if listeners:
-            for l in listeners:
-                self.add_listener(l)
 
     dispatch = event.dispatcher(events.PoolEvents)
 
@@ -194,11 +160,11 @@ class Pool(log.Identified):
         raise NotImplementedError()
 
     def connect(self):
-        """Return a DBAPI connection from the pool.
+        """Return a connection from the pool.
 
         The connection is instrumented such that when its 
-        ``close()`` method is called, the connection will be returned to 
-        the pool.
+        ``close()`` method is called or is dereferenced, the connection will
+        be returned to the pool.
 
         """
         if not self._use_threadlocal:
@@ -218,7 +184,7 @@ class Pool(log.Identified):
     def _return_conn(self, record):
         """Given a _ConnectionRecord, return it to the :class:`.Pool`.
 
-        This method is called when an instrumented DBAPI connection
+        This method is called when an instrumented connection
         has its ``close()`` method called.
 
         """
@@ -256,14 +222,7 @@ class _ConnectionRecord(object):
 
     def close(self):
         if self.connection is not None:
-            self.__pool.logger.debug("Closing connection %r", self.connection)
-            try:
-                self.connection.close()
-            except (SystemExit, KeyboardInterrupt):
-                raise
-            except:
-                self.__pool.logger.debug("Exception closing connection %r",
-                                self.connection)
+            self.__close()
 
     def invalidate(self, e=None):
         if e is not None:
@@ -295,9 +254,11 @@ class _ConnectionRecord(object):
         return self.connection
 
     def __close(self):
+        if not self.__pool.close_method:
+            return
         try:
             self.__pool.logger.debug("Closing connection %r", self.connection)
-            self.connection.close()
+            getattr(self.connection, self._pool.close_method)()
         except (SystemExit, KeyboardInterrupt):
             raise
         except Exception, e:
@@ -325,11 +286,11 @@ def _finalize_fairy(connection, connection_record, pool, ref, echo):
 
     if connection is not None:
         try:
-            if pool._reset_on_return:
-                connection.rollback()
+            if pool._reset_on_return and pool.reset_method:
+                getattr(connection, pool.reset_method)()
             # Immediately close detached instances
-            if connection_record is None:
-                connection.close()
+            if connection_record is None and pool.close_method:
+                getattr(connection, pool.close_method)()
         except Exception, e:
             if connection_record is not None:
                 connection_record.invalidate(e=e)
@@ -351,7 +312,7 @@ def _finalize_fairy(connection, connection_record, pool, ref, echo):
 _refs = set()
 
 class _ConnectionFairy(object):
-    """Proxies a DB-API connection and provides return-on-dereference
+    """Proxies a connection and provides return-on-dereference
     support."""
 
     __slots__ = '_pool', '__counter', 'connection', \
@@ -389,7 +350,7 @@ class _ConnectionFairy(object):
 
     @property
     def info(self):
-        """An info collection unique to this DB-API connection."""
+        """An info collection unique to this connection."""
 
         try:
             return self._connection_record.info
@@ -415,9 +376,6 @@ class _ConnectionFairy(object):
             self._connection_record.invalidate(e=e)
         self.connection = None
         self._close()
-
-    def cursor(self, *args, **kwargs):
-        return self.connection.cursor(*args, **kwargs)
 
     def __getattr__(self, key):
         return getattr(self.connection, key)
@@ -454,7 +412,7 @@ class _ConnectionFairy(object):
 
         This means that the connection will no longer be returned to the
         pool when closed, and will instead be literally closed.  The
-        containing ConnectionRecord is separated from the DB-API connection,
+        containing ConnectionRecord is separated from the connection,
         and will create a new connection when next used.
 
         Note that any overall connection limiting constraints imposed by a
@@ -492,10 +450,6 @@ class SingletonThreadPool(Pool):
 
     :param pool_size: The number of threads in which to maintain connections 
         at once.  Defaults to five.
-
-    :class:`.SingletonThreadPool` is used by the SQLite dialect
-    automatically when a memory-based database is used.
-    See :ref:`sqlite_toplevel`.
 
     """
 
@@ -570,7 +524,7 @@ class QueuePool(Pool):
         """
         Construct a QueuePool.
 
-        :param creator: a callable function that returns a DB-API
+        :param creator: a callable function that returns a 
           connection object.  The function will be called with
           parameters.
 
@@ -580,7 +534,7 @@ class QueuePool(Pool):
           begins with no connections; once this number of connections
           is requested, that number of connections will remain.
           ``pool_size`` can be set to 0 to indicate no size limit; to
-          disable pooling, use a :class:`~sqlalchemy.pool.NullPool`
+          disable pooling, use a :class:`~pool.NullPool`
           instead.
 
         :param max_overflow: The maximum overflow size of the
@@ -607,7 +561,7 @@ class QueuePool(Pool):
         :param echo: If True, connections being pulled and retrieved
           from the pool will be logged to the standard output, as well
           as pool sizing information.  Echoing can also be achieved by
-          enabling logging for the "sqlalchemy.pool"
+          enabling logging for the "pool"
           namespace. Defaults to False.
 
         :param use_threadlocal: If set to True, repeated calls to
@@ -620,15 +574,9 @@ class QueuePool(Pool):
           threadlocal behavior installed into :meth:`connect`.
 
         :param reset_on_return: If true, reset the database state of
-          connections returned to the pool.  This is typically a
-          ROLLBACK to release locks and transaction resources.
+          connections returned to the pool.  This is a call of
+          :attr:`reset_method` to release locks and transaction resources.
           Disable at your own peril.  Defaults to True.
-
-        :param listeners: A list of
-          :class:`~sqlalchemy.interfaces.PoolListener`-like objects or
-          dictionaries of callables that receive events when DB-API
-          connections are created, checked out and checked in to the
-          pool.
 
         """
         Pool.__init__(self, creator, **kw)
@@ -717,16 +665,12 @@ class QueuePool(Pool):
 class NullPool(Pool):
     """A Pool which does not pool connections.
 
-    Instead it literally opens and closes the underlying DB-API connection
+    Instead it literally opens and closes the underlying connection
     per each connection open/close.
 
     Reconnect-related functions such as ``recycle`` and connection
     invalidation are not supported by this Pool implementation, since
     no connections are held persistently.
-
-    :class:`.NullPool` is used by the SQlite dilalect automatically
-    when a file-based database is used (as of SQLAlchemy 0.7).
-    See :ref:`sqlite_toplevel`.
 
     """
 
@@ -808,7 +752,7 @@ class AssertionPool(Pool):
     
     :class:`.AssertionPool` also logs a traceback of where
     the original connection was checked out, and reports
-    this in the assertion error raised (new in 0.7).
+    this in the assertion error raised.
 
     """
     def __init__(self, *args, **kw):
@@ -855,91 +799,28 @@ class AssertionPool(Pool):
             self._checkout_traceback = traceback.format_stack()
         return self._conn
 
-class _DBProxy(object):
-    """Layers connection pooling behavior on top of a standard DB-API module.
 
-    Proxies a DB-API 2.0 connect() call to a connection pool keyed to the
-    specific connect parameters. Other functions and attributes are delegated
-    to the underlying DB-API module.
-    """
+def thread_safe_factory(poolclass=QueuePool, **pool_kw):
+    """Make a factory return thread-safe connection objects."""
+    def decorator(factory):
+        @wraps(factory)
+        def _(*a, **kw):
+            pool = poolclass(partial(factory, *a, **kw), **pool_kw)
+            return ThreadSafeProxy(pool.connect)
+        return _
+    return decorator
 
-    def __init__(self, module, poolclass=QueuePool, **kw):
-        """Initializes a new proxy.
 
-        module
-          a DB-API 2.0 module
+class ThreadSafeProxy(object):
+    def __init__(self, factory):
+        self.factory = factory
+        self.local = threading.local()
 
-        poolclass
-          a Pool class, defaulting to QueuePool
+    def __getattr__(self, name):
+        conn = getattr(self.local, 'connection', None)
+        if conn is None:
+            self.local.connection = conn = self.factory()
+        return getattr(conn, name)
 
-        Other parameters are sent to the Pool object's constructor.
 
-        """
 
-        self.module = module
-        self.kw = kw
-        self.poolclass = poolclass
-        self.pools = {}
-        self._create_pool_mutex = threading.Lock()
-
-    def close(self):
-        for key in self.pools.keys():
-            del self.pools[key]
-
-    def __del__(self):
-        self.close()
-
-    def __getattr__(self, key):
-        return getattr(self.module, key)
-
-    def get_pool(self, *args, **kw):
-        key = self._serialize(*args, **kw)
-        try:
-            return self.pools[key]
-        except KeyError:
-            self._create_pool_mutex.acquire()
-            try:
-                if key not in self.pools:
-                    kw.pop('sa_pool_key', None)
-                    pool = self.poolclass(lambda: 
-                                self.module.connect(*args, **kw), **self.kw)
-                    self.pools[key] = pool
-                    return pool
-                else:
-                    return self.pools[key]
-            finally:
-                self._create_pool_mutex.release()
-
-    def connect(self, *args, **kw):
-        """Activate a connection to the database.
-
-        Connect to the database using this DBProxy's module and the given
-        connect arguments.  If the arguments match an existing pool, the
-        connection will be returned from the pool's current thread-local
-        connection instance, or if there is no thread-local connection
-        instance it will be checked out from the set of pooled connections.
-
-        If the pool has no available connections and allows new connections
-        to be created, a new database connection will be made.
-
-        """
-
-        return self.get_pool(*args, **kw).connect()
-
-    def dispose(self, *args, **kw):
-        """Dispose the pool referenced by the given connect arguments."""
-
-        key = self._serialize(*args, **kw)
-        try:
-            del self.pools[key]
-        except KeyError:
-            pass
-
-    def _serialize(self, *args, **kw):
-        if "sa_pool_key" in kw:
-            return kw['sa_pool_key']
-
-        return tuple(
-            list(args) + 
-            [(k, kw[k]) for k in sorted(kw)]
-        )

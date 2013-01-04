@@ -28,9 +28,9 @@ class memoized_property(object):
         obj.__dict__[self.__name__] = result = self.fget(obj)
         return result
 
-_SQLA_RE = re.compile(r'sqlalchemy/([a-z_]+/){0,2}[a-z_]+\.py')
+_POOL_RE = re.compile(r'pool/([a-z_]+/){0,2}[a-z_]+\.py')
 _UNITTEST_RE = re.compile(r'unit(?:2|test2?/)')
-def chop_traceback(tb, exclude_prefix=_UNITTEST_RE, exclude_suffix=_SQLA_RE):
+def chop_traceback(tb, exclude_prefix=_UNITTEST_RE, exclude_suffix=_POOL_RE):
     """Chop extraneous lines off beginning and end of a traceback.
 
     :param tb:
