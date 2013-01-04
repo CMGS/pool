@@ -3,8 +3,8 @@ import threading
 from nose.tools import eq_
 import pool.pool as M
 
-def test_managed_factory_should_not_interfered_between_threads():
-    @M.manage_factory
+def test_thread_safe_factory_should_not_interfered_between_threads():
+    @M.ThreadSafeFactory
     class MemcacheClient(object):
         def get(self, key):
             self.to_return = key
@@ -28,3 +28,5 @@ def test_managed_factory_should_not_interfered_between_threads():
     t2.join()
     eq_(r1, [1])
     eq_(r2, [2])
+
+

@@ -945,16 +945,10 @@ class _DBProxy(object):
         )
 
 
-factories = {}
 
-def manage_factory(factory, **params):
-    managed_factory = factories.get(factory)
-    if managed_factory is None:
-        managed_factory = factories[factory] = ManagedFactory(factory, **params)
-    return managed_factory
+class ThreadSafeFactory(object):
+    """Let a connection factory (e.g. Connection class) return thread-safe objects."""
 
-
-class ManagedFactory(object):
     def __init__(self, factory, poolclass=QueuePool, **kw):
         self.factory = factory
         self.poolclass = poolclass
@@ -994,7 +988,15 @@ class ManagedFactory(object):
         if 'pool_key' in kw:
             return kw['pool_key']
 
-        return (args, tuple(sorted(kw.items())))
+        def make_hashable(d):
+            if isinstance(d, list):
+                return tuple(d)
+            elif isinstance(d, dict):
+                return tuple(sorted((k, make_hashable(v))
+                                    for k, v in d.items()))
+            return d
+
+        return (args, make_hashable(kw))
 
 
 class PooledProxy(object):
