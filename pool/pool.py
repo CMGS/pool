@@ -22,41 +22,6 @@ from . import exc, log, event, events, interfaces
 from .util import queue as sqla_queue
 from .util import threading, memoized_property, chop_traceback
 
-proxies = {}
-
-def manage(factory, **params):
-    """Return a proxy for a connection factory that automatically 
-    pools connections.
-
-    Given a connection factory and pool management parameters, returns
-    a proxy for the factory that will automatically pool connections,
-    creating new connection pools for each distinct set of connection
-    arguments sent to the decorated factory.
-
-    :param factory: a connection factory
-
-    :param poolclass: the class used by the pool module to provide
-      pooling.  Defaults to :class:`.QueuePool`.
-
-    :param \*\*params: will be passed through to *poolclass*
-
-    """
-    try:
-        return proxies[factory]
-    except KeyError:
-        return proxies.setdefault(factory, _Proxy(factory, **params))
-
-def clear_managers():
-    """Remove all current managers.
-
-    All pools and connections are disposed.
-    """
-
-    for manager in proxies.itervalues():
-        manager.close()
-    proxies.clear()
-
-
 class Pool(log.Identified):
     """Abstract base class for connection pools."""
 
@@ -833,12 +798,16 @@ class AssertionPool(Pool):
             self._checkout_traceback = traceback.format_stack()
         return self._conn
 
-class _Proxy(object):
+
+class ThreadSafeFactory(object):
     """Layers connection pooling behavior on top of a connection factory.
 
-    Proxies a factory call to a connection pool keyed to the
-    specific connect parameters. Other functions and attributes are delegated
-    to the underlying factory.
+    Proxies a factory call to a connection pool keyed to the specific connect
+    parameters.
+
+    The returned connection object proxy is thread safe, i.e. calling its
+    method in different thread will not interfered with each other.
+
     """
 
     def __init__(self, factory, poolclass=QueuePool, **kw):
@@ -867,9 +836,6 @@ class _Proxy(object):
     def __del__(self):
         self.close()
 
-    def __getattr__(self, key):
-        return getattr(self.factory, key)
-
     def get_pool(self, *args, **kw):
         key = self._serialize(*args, **kw)
         try:
@@ -878,7 +844,7 @@ class _Proxy(object):
             self._create_pool_mutex.acquire()
             try:
                 if key not in self.pools:
-                    kw.pop('sa_pool_key', None)
+                    kw.pop('pool_key', None)
                     pool = self.poolclass(lambda: 
                                 self.factory(*args, **kw), **self.kw)
                     self.pools[key] = pool
@@ -889,9 +855,9 @@ class _Proxy(object):
                 self._create_pool_mutex.release()
 
     def __call__(self, *args, **kw):
-        """Activate a connection.
+        """Return a thread-safe proxy to connection.
 
-        Connect to the server using this Proxy's factory and the given
+        Return a thread-safe proxy for the connection using the given
         connect arguments.  If the arguments match an existing pool, the
         connection will be returned from the pool's current thread-local
         connection instance, or if there is no thread-local connection
@@ -902,7 +868,7 @@ class _Proxy(object):
 
         """
 
-        return self.get_pool(*args, **kw).connect()
+        return ThreadSafeProxy(self.get_pool(*args, **kw).connect)
 
     def dispose(self, *args, **kw):
         """Dispose the pool referenced by the given connect arguments."""
@@ -923,4 +889,9 @@ class _Proxy(object):
         )
 
 
+class ThreadSafeProxy(object):
+    def __init__(self, factory):
+        self.factory = factory
 
+    def __getattr__(self, name):
+        return getattr(self.factory(), name)

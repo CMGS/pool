@@ -3,14 +3,14 @@ import threading
 from nose.tools import eq_
 import pool.pool as M
 
-class TestThreadSafeFactory:
+class TestManager:
     def test_the_returned_obj_should_not_interfered_between_threads(self):
         @M.ThreadSafeFactory
         class MemcacheClient(object):
             def get(self, key):
                 self.to_return = key
                 # time.sleep to make thread switch, like socket operations
-                time.sleep(1)
+                time.sleep(0.1)
                 return self.to_return
 
         def run_in_thread(func, args=(), kwargs={}, return_holder=[]):
@@ -31,3 +31,13 @@ class TestThreadSafeFactory:
         eq_(r2, [2])
 
 
+    def test_the_returned_obj_should_use_the_same_connection_for_same_thread(self):
+        @M.ThreadSafeFactory
+        class MemcacheClient(object):
+            def get(self, key):
+                return id(self)
+
+        mc = MemcacheClient()
+        v1 = mc.get('key1')
+        v2 = mc.get('key2')
+        eq_(v1, v2)
