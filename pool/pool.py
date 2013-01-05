@@ -258,7 +258,7 @@ class _ConnectionRecord(object):
             return
         try:
             self.__pool.logger.debug("Closing connection %r", self.connection)
-            getattr(self.connection, self._pool.close_method)()
+            getattr(self.connection, self.__pool.close_method)()
         except (SystemExit, KeyboardInterrupt):
             raise
         except Exception, e:
