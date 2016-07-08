@@ -261,7 +261,7 @@ class _ConnectionRecord(object):
             getattr(self.connection, self.__pool.close_method)()
         except (SystemExit, KeyboardInterrupt):
             raise
-        except Exception, e:
+        except Exception as e:
             self.__pool.logger.debug(
                         "Connection %r threw an error on close: %s",
                         self.connection, e)
@@ -272,7 +272,7 @@ class _ConnectionRecord(object):
             connection = self.__pool._creator()
             self.__pool.logger.debug("Created new connection %r", connection)
             return connection
-        except Exception, e:
+        except Exception as e:
             self.__pool.logger.debug("Error on connect(): %s", e)
             raise
 
@@ -291,7 +291,7 @@ def _finalize_fairy(connection, connection_record, pool, ref, echo):
             # Immediately close detached instances
             if connection_record is None and pool.close_method:
                 getattr(connection, pool.close_method)()
-        except Exception, e:
+        except Exception as e:
             if connection_record is not None:
                 connection_record.invalidate(e=e)
             if isinstance(e, (SystemExit, KeyboardInterrupt)):
@@ -396,7 +396,7 @@ class _ConnectionFairy(object):
                                             self._connection_record,
                                             self)
                 return self
-            except exc.DisconnectionError, e:
+            except exc.DisconnectionError as e:
                 self._pool.logger.info(
                 "Disconnection detected on checkout: %s", e)
                 self._connection_record.invalidate(e)

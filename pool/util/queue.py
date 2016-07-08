@@ -15,7 +15,7 @@ condition."""
 
 from collections import deque
 from time import time as _time
-from compat import threading
+from .compat import threading
 
 __all__ = ['Empty', 'Full', 'Queue']
 
@@ -29,7 +29,7 @@ class Full(Exception):
 
     pass
 
-class Queue:
+class Queue(object):
     def __init__(self, maxsize=0):
         """Initialize a queue object with a given maximum size.
 

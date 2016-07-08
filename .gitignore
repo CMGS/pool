@@ -2,3 +2,4 @@
 *.swp
 dist
 pool.egg-info
+.tox
