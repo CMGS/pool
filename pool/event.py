@@ -2,7 +2,7 @@
 
 from . import util, exc
 
-from six import with_metaclass
+from six import add_metaclass
 
 CANCEL = util.symbol('CANCEL')
 NO_RETVAL = util.symbol('NO_RETVAL')
@@ -154,7 +154,8 @@ def _remove_dispatcher(cls):
             if not _registrars[k]:
                 del _registrars[k]
 
-class Events(with_metaclass(_EventMeta, object)):
+@add_metaclass(_EventMeta)
+class Events(object):
     """Define event listening functions for a particular target type."""
 
     @classmethod
